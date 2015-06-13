@@ -18,3 +18,11 @@ http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "index.htm")
 })
 ```
+
+This will be stored encrypted in the session storage
+```go
+type authState struct {
+	UserName string
+	Claims   []string
+}
+```
