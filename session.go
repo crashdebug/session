@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/big"
 	rnd "math/rand"
 	"net/http"
@@ -96,7 +95,6 @@ func (s *Session) getState(state interface{}, key []byte) error {
 		return err
 	}
 	s.nonce = data.Nonce
-	log.Printf("%+v", state)
 	return nil
 }
 
@@ -169,28 +167,29 @@ func Get(st Storage, state interface{}, w http.ResponseWriter, r *http.Request, 
 									session.setState(state, symkey)
 									st.SetSession(session)
 									set(w, cookieName, sessionID, r.Host, symkey, alg.Sum(nil))
+									session.nonce = nil
 								}
 								return session, nil
 							}
-							log.Println("Hash mismatch.")
-						} else {
+							// log.Println("Hash mismatch.")
+						} /*else {
 							log.Printf("Could not get authentication state: %s", err)
-						}
-					} else {
+						}*/
+					} /*else {
 						log.Printf("Could not get session from storage: %s", err)
-					}
-				} else {
+					}*/
+				} /*else {
 					log.Printf("Could not decode hash: %s", err)
-				}
-			} else {
+				}*/
+			} /*else {
 				log.Printf("Could not decode symmetric key: %s", err)
-			}
-		} else {
+			}*/
+		} /*else {
 			log.Printf("Invalid cookie value: %s", cookie.Value)
-		}
-	} else {
+		}*/
+	} /*else {
 		log.Printf("No cookie with name '%s'", cookieName)
-	}
+	}*/
 
 	if sessionID == "" {
 		sessionID = randSeq(32)
@@ -201,7 +200,6 @@ func Get(st Storage, state interface{}, w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		return nil, err
 	}
-	// state.SetNonce(nonce)
 	session.nonce = nonce
 
 	symkey = make([]byte, 32)
