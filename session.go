@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -28,23 +29,19 @@ type MemoryStorage struct {
 	sessions map[string]*Session
 }
 
-// State type provides session state information, such as session variables.
-type State struct {
-	nonce *big.Int
-}
-
 // Session type represents the current user session.
 type Session struct {
 	id         string
+	nonce      *big.Int
 	Created    time.Time
 	LastAccess time.Time
 	Data       []byte
-	state      *State
 	finalize   func()
 }
 
 type stateData struct {
 	Nonce *big.Int
+	Data  []byte
 }
 
 // NewSession creates a new session.
@@ -69,38 +66,70 @@ func (s *Session) EndRequest() {
 	}
 }
 
-func (s *Session) getState(key []byte) (*State, error) {
+func (s *Session) getState(state interface{}, key []byte) error {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	iv := s.id[:aes.BlockSize]
 	mode := cipher.NewCBCDecrypter(block, []byte(iv))
 	dst := make([]byte, len(s.Data))
 	mode.CryptBlocks(dst, s.Data)
 
-	var data stateData
-	dec := json.NewDecoder(bytes.NewBuffer(dst))
-	if err = dec.Decode(&data); err != nil {
-		return nil, err
+	buf := bytes.NewBuffer(dst)
+
+	l, err := binary.ReadVarint(buf)
+	if err != nil {
+		return err
 	}
-	s.state = &State{nonce: data.Nonce}
-	return s.state, nil
+	nonce := make([]byte, l)
+	if _, err = buf.Read(nonce); err != nil {
+		return err
+	}
+
+	var data stateData
+	dec := json.NewDecoder(buf)
+	if err = dec.Decode(&data); err != nil {
+		return fmt.Errorf("JSON decode error: %s", err)
+	}
+	if err = json.Unmarshal(data.Data, state); err != nil {
+		return err
+	}
+	s.nonce = data.Nonce
+	log.Printf("%+v", state)
+	return nil
 }
 
-func (s *Session) setState(state *State, key []byte) error {
+func (s *Session) setState(state interface{}, key []byte) error {
+	if state == nil {
+		return fmt.Errorf("State cannot be nil")
+	}
+	if key == nil || len(key) == 0 {
+		return fmt.Errorf("Invalid key (%v)", key)
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	iv := s.id[:aes.BlockSize]
 	mode := cipher.NewCBCEncrypter(block, []byte(iv))
 
-	d, err := json.Marshal(&stateData{Nonce: state.nonce})
+	buf := new(bytes.Buffer)
+	nonce := s.nonce.Bytes()
+	writeVarint(len(nonce), buf)
+	buf.Write(nonce)
+
+	d, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
+	enc := json.NewEncoder(buf)
+	err = enc.Encode(&stateData{Nonce: s.nonce, Data: d})
+	if err != nil {
+		return err
+	}
+	d = buf.Bytes()
 	if len(d)%aes.BlockSize != 0 {
 		d = append(d, make([]byte, aes.BlockSize-(len(d)%aes.BlockSize))...)
 	}
@@ -111,10 +140,9 @@ func (s *Session) setState(state *State, key []byte) error {
 }
 
 // Get returns a session based on the HTTP request.
-func Get(st Storage, w http.ResponseWriter, r *http.Request, cookieName string) (*Session, error) {
+func Get(st Storage, state interface{}, w http.ResponseWriter, r *http.Request, cookieName string) (*Session, error) {
 	var sessionID string
 	var symkey []byte
-	var state *State
 	alg := sha256.New()
 
 	if cookie, err := r.Cookie(cookieName); err == nil {
@@ -124,17 +152,17 @@ func Get(st Storage, w http.ResponseWriter, r *http.Request, cookieName string) 
 			if symkey, err = base64.StdEncoding.DecodeString(values[1]); err == nil {
 				if hash, err := base64.StdEncoding.DecodeString(values[2]); err == nil {
 					if session, err := st.GetSession(values[0]); err == nil {
-						if state, err = session.getState(symkey); err == nil {
-							alg.Write(state.nonce.Bytes())
+						if err = session.getState(state, symkey); err == nil {
+							alg.Write(session.nonce.Bytes())
 							alg.Write([]byte(values[0]))
 							alg.Write(symkey)
 							if checkHash(alg.Sum(nil), hash) {
 								session.finalize = func() {
-									state.nonce = state.nonce.Add(state.nonce, big.NewInt(1))
+									session.nonce = session.nonce.Add(session.nonce, big.NewInt(1))
 									session.LastAccess = time.Now()
 
 									alg.Reset()
-									alg.Write(state.nonce.Bytes())
+									alg.Write(session.nonce.Bytes())
 									alg.Write([]byte(values[0]))
 									alg.Write(symkey)
 
@@ -146,20 +174,22 @@ func Get(st Storage, w http.ResponseWriter, r *http.Request, cookieName string) 
 							}
 							log.Println("Hash mismatch.")
 						} else {
-							log.Printf("Could not get authentication state. %s", err)
+							log.Printf("Could not get authentication state: %s", err)
 						}
 					} else {
-						log.Printf("Could not get session from storage. %s", err)
+						log.Printf("Could not get session from storage: %s", err)
 					}
 				} else {
-					log.Printf("Could not decode hash. %s", err)
+					log.Printf("Could not decode hash: %s", err)
 				}
 			} else {
-				log.Printf("Could not decode symmetric key. %s", err)
+				log.Printf("Could not decode symmetric key: %s", err)
 			}
 		} else {
 			log.Printf("Invalid cookie value: %s", cookie.Value)
 		}
+	} else {
+		log.Printf("No cookie with name '%s'", cookieName)
 	}
 
 	if sessionID == "" {
@@ -171,21 +201,21 @@ func Get(st Storage, w http.ResponseWriter, r *http.Request, cookieName string) 
 	if err != nil {
 		return nil, err
 	}
+	// state.SetNonce(nonce)
+	session.nonce = nonce
+
 	symkey = make([]byte, 32)
 	if i, err := rand.Read(symkey); err != nil {
 		return nil, err
 	} else if i < len(symkey) {
 		return nil, fmt.Errorf("Could not generate key")
 	}
-	state = &State{
-		nonce: nonce,
-	}
 	session.setState(state, symkey)
 	if err := st.SetSession(session); err != nil {
 		return nil, err
 	}
 
-	alg.Write(state.nonce.Bytes())
+	alg.Write(session.nonce.Bytes())
 	alg.Write([]byte(sessionID))
 	alg.Write(symkey)
 
@@ -215,6 +245,11 @@ func (st *MemoryStorage) GetSession(id string) (*Session, error) {
 func (st *MemoryStorage) SetSession(session *Session) error {
 	st.sessions[session.ID()] = session
 	return nil
+}
+
+func writeVarint(i int, buf *bytes.Buffer) {
+	d := make([]byte, 8)
+	buf.Write(d[:binary.PutVarint(d, int64(i))])
 }
 
 func checkHash(a, b []byte) bool {
