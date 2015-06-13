@@ -58,6 +58,8 @@ func TestSession(t *testing.T) {
 		t.Fatalf("Expected to get one cookie, got %d", i)
 	} else if cookie == cookies.Cookies(u)[0].Value {
 		t.Fatal("Cookie value did not change between requests")
+	} else if cookie[:32] != cookies.Cookies(u)[0].Value[:32] {
+		t.Fatal("Session ID changed")
 	}
 }
 
